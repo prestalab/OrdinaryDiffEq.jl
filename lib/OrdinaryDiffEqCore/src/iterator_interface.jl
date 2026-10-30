@@ -5,6 +5,7 @@ function _step!(integrator)
             loopheader!(integrator)
             (integrator.do_error_check && check_error!(integrator) != ReturnCode.Success) &&
                 return integrator.sol.retcode
+            _prepare_clock_step!(integrator) || return integrator.sol.retcode
             perform_step!(integrator, integrator.cache)
             _loopfooter!(integrator)
         end
@@ -12,12 +13,14 @@ function _step!(integrator)
         loopheader!(integrator)
         (integrator.do_error_check && check_error!(integrator) != ReturnCode.Success) &&
             return integrator.sol.retcode
+        _prepare_clock_step!(integrator) || return integrator.sol.retcode
         perform_step!(integrator, integrator.cache)
         _loopfooter!(integrator)
         while !integrator.accept_step
             loopheader!(integrator)
             (integrator.do_error_check && check_error!(integrator) != ReturnCode.Success) &&
                 return integrator.sol.retcode
+            _prepare_clock_step!(integrator) || return integrator.sol.retcode
             perform_step!(integrator, integrator.cache)
             _loopfooter!(integrator)
         end

@@ -1068,12 +1068,8 @@ function SciMLBase.solve!(integrator::ODEIntegrator)
                 return integrator.sol
             end
 
-            # Use special tstop handling if flag is set, otherwise normal stepping
-            if integrator.next_step_tstop
-                handle_tstop_step!(integrator)
-            else
-                perform_step!(integrator, integrator.cache)
-            end
+            _prepare_clock_step!(integrator) || return integrator.sol
+            perform_step!(integrator, integrator.cache)
 
             should_exit = integrator.next_step_tstop
 

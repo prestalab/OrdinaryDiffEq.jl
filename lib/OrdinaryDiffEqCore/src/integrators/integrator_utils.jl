@@ -268,71 +268,77 @@ _set_tstop_flag!(integrator, is_tstop::Bool, target = nothing) = nothing
 
 _get_tstop_target(integrator::ODEIntegrator) = integrator.tstop_target
 
-function modify_dt_for_tstops!(integrator)
-    if has_tstop(integrator)
-        tdir_t = integrator.tdir * integrator.t
-        tdir_tstop = first_tstop(integrator)
-        distance_to_tstop = abs(tdir_tstop - tdir_t)
-        # Floating-point tolerance so that a dt whose nominal value matches
-        # distance_to_tstop to within rounding still triggers the tstop
-        # branch.  Without this, accumulated `t + dt + dt + …` can drift
-        # just past the last tstop and produce a spurious micro-step.
-        tstop_tol = if integrator.t isa AbstractFloat && isfinite(tdir_tstop) &&
-                isfinite(integrator.t)
-            100 * eps(
-                float(
-                    max(abs(integrator.t), abs(tdir_tstop)) /
-                        oneunit(integrator.t)
-                )
-            ) * oneunit(integrator.t)
-        else
-            zero(distance_to_tstop)
-        end
+@inline _clock_aligned_dt(t, dt, tdir, tstop) = dt
 
+# Repeated rounding is needed at binade boundaries. Each nonterminal pass
+# reduces |dt|; no interval is skipped or enlarged to manufacture progress.
+@inline function _clock_aligned_dt(t::T, dt::T, tdir, tstop) where {T <: AbstractFloat}
+    isfinite(t) && isfinite(dt) || return dt
+    while true
+        bound = abs(dt)
+        endpoint = t + dt
+        if tstop !== nothing && (tdir > 0 ? endpoint > tstop : endpoint < tstop)
+            dt = tdir * prevfloat(bound)
+            continue
+        end
+        aligned = endpoint - t
+        if abs(aligned) > bound
+            endpoint = tdir > 0 ? prevfloat(endpoint) : nextfloat(endpoint)
+            aligned = endpoint - t
+        end
+        aligned == dt && return aligned
+        dt = aligned
+    end
+    return
+end
+
+function modify_dt_for_tstops!(integrator)
+    tstop = has_tstop(integrator) ? integrator.tdir * first_tstop(integrator) : nothing
+    if tstop !== nothing
+        distance_to_tstop = abs(tstop - integrator.t)
         if integrator.opts.adaptive
             original_dt = abs(integrator.dt)
             integrator.dtpropose = integrator.tdir * original_dt
-            if original_dt + tstop_tol < distance_to_tstop
-                _set_tstop_flag!(integrator, false)
-            else
-                _set_tstop_flag!(
-                    integrator, true, integrator.tdir * tdir_tstop
-                )
-            end
             integrator.dt = integrator.tdir * min(original_dt, distance_to_tstop)
         elseif iszero(integrator.dtcache) && integrator.dtchangeable
             integrator.dt = integrator.tdir * distance_to_tstop
-            _set_tstop_flag!(
-                integrator, true, integrator.tdir * tdir_tstop
-            )
         elseif integrator.dtchangeable && !integrator.force_stepfail
-            # always try to step! with dtcache, but lower if a tstop
-            # however, if force_stepfail then don't set to dtcache, and no tstop worry
-            if abs(integrator.dtcache) + tstop_tol < distance_to_tstop
-                _set_tstop_flag!(integrator, false)
-            else
-                _set_tstop_flag!(
-                    integrator, true, integrator.tdir * tdir_tstop
-                )
-            end
-            integrator.dt = integrator.tdir *
-                min(abs(integrator.dtcache), distance_to_tstop)
-        else
-            _set_tstop_flag!(integrator, false)
+            integrator.dt = integrator.tdir * min(abs(integrator.dtcache), distance_to_tstop)
         end
-    else
-        _set_tstop_flag!(integrator, false)
     end
+
+    if integrator.dtchangeable
+        integrator.dt = integrator.tdir * min(abs(integrator.dt), abs(integrator.opts.dtmax))
+    end
+
+    reaches_stop = (integrator.opts.adaptive || integrator.dtchangeable) &&
+        tstop !== nothing && !iszero(integrator.dt) && integrator.t + integrator.dt == tstop
+    _set_tstop_flag!(integrator, reaches_stop, tstop)
     return nothing
 end
 
-function handle_tstop_step!(integrator)
-    return if integrator.t isa AbstractFloat && abs(integrator.dt) < eps(abs(integrator.t))
-        # Skip perform_step! entirely for tiny dt
-        integrator.accept_step = true
-    else
-        perform_step!(integrator, integrator.cache)
+# Native failure guards inspect the controller proposal. Align only afterwards,
+# immediately before the formula, preserving nextfloat(eps(t)) startup behavior.
+function _prepare_clock_step!(integrator)
+    tstop = has_tstop(integrator) ? integrator.tdir * first_tstop(integrator) : nothing
+    if integrator.dtchangeable
+        integrator.dt = _clock_aligned_dt(integrator.t, integrator.dt, integrator.tdir, tstop)
+        if iszero(integrator.dt) && tstop !== nothing && tstop != integrator.t
+            _set_tstop_flag!(integrator, false)
+            if integrator.sol.retcode in (ReturnCode.Default, ReturnCode.Success)
+                SciMLBase.report_integrator_failure(integrator, Val(:dt_epsilon))
+                integrator.sol = SciMLBase.solution_new_retcode(integrator.sol, ReturnCode.Unstable)
+            end
+            integrator.do_error_check = true
+            check_error!(integrator)
+            return false
+        end
+        shrink_noise_to_integrator_dt!(integrator)
     end
+    reaches_stop = (integrator.opts.adaptive || integrator.dtchangeable) &&
+        tstop !== nothing && !iszero(integrator.dt) && integrator.t + integrator.dt == tstop
+    _set_tstop_flag!(integrator, reaches_stop, tstop)
+    return true
 end
 
 # Want to extend savevalues! for DDEIntegrator
@@ -629,22 +635,25 @@ function _loopfooter!(integrator)
             integrator.last_stepfail = false
             integrator.tprev = integrator.t
 
-            if _get_next_step_tstop(integrator)
-                # Step controller dt is overly pessimistic, since dt = time to tstop.
-                # Restore the original dt so the controller proposes a reasonable next step.
-                integrator.dt = integrator.dtpropose
-            end
-            integrator.t = fixed_t_for_tstop_error!(integrator, ttmp)
+            accepted_dt = integrator.dt
+            try
+                if _get_next_step_tstop(integrator)
+                    # Preserve the controller proposal, not as the callback interval.
+                    integrator.dt = integrator.dtpropose
+                end
+                integrator.t = fixed_t_for_tstop_error!(integrator, ttmp)
 
-            dtnew = SciMLBase.value(
-                step_accept_controller!(
-                    integrator,
-                    integrator.alg,
-                    q
-                )
-            ) *
-                oneunit(integrator.dt)
-            calc_dt_propose!(integrator, dtnew)
+                dtnew = SciMLBase.value(
+                    step_accept_controller!(
+                        integrator,
+                        integrator.alg,
+                        q
+                    )
+                ) * oneunit(integrator.dt)
+                calc_dt_propose!(integrator, dtnew)
+            finally
+                integrator.dt = accepted_dt
+            end
             handle_callbacks!(integrator)
         else # Reject
             increment_reject!(integrator.stats)
