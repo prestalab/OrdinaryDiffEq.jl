@@ -1,3 +1,12 @@
+## Maintained-fork numerical correction
+
+- FBDF and DFBDF retain the newer accepted state without adding a nearly
+  coincident interpolation node when the accepted interval is unresolved
+  relative to the neighboring history interval/current proposal. This avoids
+  amplifying state roundoff through ill-conditioned Lagrange history after a
+  tiny step to a prescribed stop. Accepted times, states and native error,
+  domain and step-bound checks are unchanged.
+
 # OrdinaryDiffEq.jl v7 / DifferentialEquations.jl v8 Breaking Changes
 
 This release bumps to **SciMLBase v3**, **RecursiveArrayTools v4**, and includes breaking changes across **DiffEqBase**, **OrdinaryDiffEqCore**, and all solver sublibraries. It also coincides with the **DifferentialEquations.jl v8** umbrella release, which is itself a breaking change to the user-facing meta-package.

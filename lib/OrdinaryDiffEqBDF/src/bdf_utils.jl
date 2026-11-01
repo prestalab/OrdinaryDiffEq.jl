@@ -201,6 +201,11 @@ function reinitFBDF!(integrator, cache)
         order,
     ) = cache
     (; t, dt, uprev) = integrator
+    # A nearly coincident accepted point carries no resolvable new slope.
+    # Retain its newer state, rather than creating a singular history pair.
+    replace_latest = consfailcnt == 0 && iters_from_event >= 2 &&
+        t != ts[1] && abs(t - ts[1]) <= sqrt(eps(one(t))) *
+        max(abs(dt), abs(ts[1] - ts[2]))
 
     if integrator.derivative_discontinuity
         order = cache.order = 1
@@ -233,6 +238,9 @@ function reinitFBDF!(integrator, cache)
             ts[1] = t
             copyto!(u_history[2], u_history[1])
             copyto!(u_history[1], uprev)
+        elseif replace_latest
+            ts[1] = t
+            copyto!(u_history[1], uprev)
         elseif consfailcnt == 0 && t != ts[1]
             for i in (order + 2):-1:2
                 ts[i] = ts[i - 1]
@@ -249,6 +257,9 @@ function reinitFBDF!(integrator, cache)
             ts[2] = ts[1]
             ts[1] = t
             u_history[2] = u_history[1]
+            u_history[1] = uprev
+        elseif replace_latest
+            ts[1] = t
             u_history[1] = uprev
         elseif consfailcnt == 0 && t != ts[1]
             for i in (order + 2):-1:2

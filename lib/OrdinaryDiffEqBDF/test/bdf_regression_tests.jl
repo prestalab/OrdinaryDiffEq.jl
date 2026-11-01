@@ -273,3 +273,39 @@ end
         @test abs(sol.u[end] - exp(-10.0)) < 1.0e-6
     end
 end
+
+@testset "FBDF retains resolvable history after a tiny accepted interval" begin
+    for direction in (-1.0, 1.0), inplace in (false, true)
+        origin = 3599.0
+        f(u, p, t) = -u
+        f!(du, u, p, t) = (du .= -u)
+        problem = inplace ? ODEProblem(f!, [1.0], (origin, origin + direction)) :
+            ODEProblem(f, 1.0, (origin, origin + direction))
+        integrator = init(problem, FBDF(); abstol = 1e-13, reltol = 1e-7)
+        cache = integrator.cache
+        integrator.derivative_discontinuity = false
+        cache.iters_from_event = 5
+        cache.consfailcnt = 0
+        cache.order = 3
+        integrator.dt = direction * 0.002
+        near = direction > 0 ? prevfloat(prevfloat(origin)) : nextfloat(nextfloat(origin))
+        cache.ts[1] = near
+        for j in 2:length(cache.ts)
+            cache.ts[j] = origin - direction * 0.2 * (j - 1)
+        end
+        old_times = copy(cache.ts)
+        old_history = deepcopy(cache.u_history)
+        OrdinaryDiffEqBDF.reinitFBDF!(integrator, cache)
+        @test cache.ts[1] == origin
+        @test cache.ts[2:end] == old_times[2:end]
+        @test cache.u_history[1] == integrator.uprev
+        @test cache.u_history[2:end] == old_history[2:end]
+        once = copy(cache.ts)
+        OrdinaryDiffEqBDF.reinitFBDF!(integrator, cache)
+        @test cache.ts == once
+        integrator.t = origin + direction * 0.01
+        OrdinaryDiffEqBDF.reinitFBDF!(integrator, cache)
+        @test cache.ts[2] == origin
+        @test cache.ts[1] == integrator.t
+    end
+end
